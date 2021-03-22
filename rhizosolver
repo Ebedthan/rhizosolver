@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+from collections import defaultdict
+from datetime import datetime
+from distutils.spawn import find_executable
+import gzip
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+
+AUTHOR = "Anicet Ebou <anicet.ebou@gmail.com>"
+URL = "https://github.com/Ebedthan/rhizosolver"
+VERSION = "0.1.0"
+
+helptime = datetime.now().strftime("%a, %d %b %Y %H:%M:%S")
+
+# Define command-line arguments----------------------------------------------
+parser = argparse.ArgumentParser(
+    prog="rhizosolver",
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    usage="rhizosolver [options] seqs.fa.gz",
+    epilog=f"Version:   {VERSION}\nLicence:   GPL-3\n"
+    + f"Homepage:  {URL}\nAuthors:   {AUTHOR}\nLast Run:  {helptime}.",
+)
+
+parser.add_argument("seqs", help="Specify input fasta file.")
+parser.add_argument(
+    "--out",
+    help="Specify output file",
+    nargs="?",
+    type=argparse.FileType("w"),
+    default=sys.stdout,
+)
+parser.add_argument(
+    "--cpus",
+    type=int,
+    default=1,
+    help="Specify the number of threads. Default: 1.",
+)
+parser.add_argument(
+    "--quiet", action="store_true", help="Decrease program verbosity"
+)
+parser.add_argument(
+    "--debug", action="store_true", help="Activate debug mode"
+)
+args = parser.parse_args()
+
+
+def main():
+    # Handling db directory path specification-------------------------------
+    try:
+        dbdir = os.environ["RHISODB"]
+    except KeyError:
+        print(
+            "rhizosolver: error: Models for predictions not found in $PATH.",
+            file=sys.stderr,
+        )
+        print(
+            "Please set RHISODB environment variable to the path "
+            + "where models are stored.",
+            file=sys.stderr,
+        )
+        print(
+            "Visit https://github.com/Ebedthan/rhizosolver for more",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Handling number of cpus -----------------------------------------------
+    cpus = args.cpus
+
+    if args.cpus == 0:
+        cpus = os.cpu_count()
+    elif args.cpus > os.cpu_count():
+        cpus = os.cpu_count()
+
+    # Verify presence of pfscan ---------------------------------------------
+    if find_executable("pfscanV3") is None:
+        print(
+            "rhizosolver: error: pfscanV3 was not found on your system."
+            + " Please install it at "
+            + "https://github.com/sib-swiss/pftools3.git"
+        )
+        sys.exit(1)
+
+    # Test if file is gzipped -----------------------------------------------
+    if is_gz_file(args.seqs):
+        with gzip.open(args.seqs, "r") as seqh:
+            with open(pathlib.Path(args.seqs).stem, "wb") as seqo:
+                shutil.copyfileobj(seqh, seqo)
+            seqo.close()
+        inpath = pathlib.Path(args.seqs).stem
+    else:
+        inpath = args.seqs
+
+    # Run pfscan
+    with open(pathlib.Path("pfscan.out"), "w") as outfile:
+        subprocess.run(
+            [
+                "pfscanV3",
+                "--nthreads",
+                str(cpus),
+                "-o",
+                "7",
+                pathlib.Path(dbdir, "rhizosolver.pssm"),
+                "-f",
+                inpath,
+            ],
+            stdout=outfile,
+        )
+
+    # Parsing result --------------------------------------------------------
+    resdict = defaultdict(dict)
+    sortres = {}
+    with open(pathlib.Path("pfscan.out")) as pssmfile:
+        rd = csv.reader(pssmfile, delimiter="\t")
+        for row in rd:
+            resdict[row[3]][row[0]] = row[6]
+    pssmfile.close()
+
+    for k, d in resdict.items():
+        sortres[k] = max(d, key=d.get)
+
+    # Writing output --------------------------------------------------------
+    # Output file handling
+    outf = args.out
+    if pathlib.Path(outf.name).exists():
+        print("[warning] Selected output file already exist. Overwriting it.")
+
+    outf.write("sequence_id\tpredicted_genus\n")
+    for key, value in sortres.items():
+        outf.write(
+            key  # sequence_id
+            + "\t"
+            + value.split("|")[0]
+            + "\n"  # predicted genus
+        )
+
+    try:
+        outfile.close()
+    except ValueError:
+        pass
+
+    # Cleaning around
+    os.remove(pathlib.Path("pfscan.out"))
+
+
+# Functions -----------------------------------------------------------------
+def is_gz_file(fp):
+    """
+    is_gz_file test if input filepath is gzipped or not.
+
+    :fp: Path to input file
+    """
+
+    with open(fp, "rb") as test:
+        return test.read(2) == b"\x1f\x8b"
+
+
+def exception_handler(
+    exception_type, exception, traceback, debug_hook=sys.excepthook
+):
+    """
+    exception_handler remove default debug info and traceback
+    from python output on command line. Use program --debug
+    option to re-enable default behaviour.
+    """
+
+    if args.debug:
+        debug_hook(exception_type, exception, traceback)
+    else:
+        print(f"{exception_type.__name__}, {exception}")
+
+
+sys.excepthook = exception_handler
+
+if __name__ == "__main__":
+    main()
